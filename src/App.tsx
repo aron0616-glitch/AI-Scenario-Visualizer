@@ -19,11 +19,16 @@ import {
   RefreshCcw,
   CheckCircle2,
   AlertCircle,
-  Key
+  Key,
+  Settings,
+  ShieldCheck,
+  FileDown,
+  Activity
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
 import JSZip from 'jszip';
+import CryptoJS from 'crypto-js';
 
 // --- Global Types ---
 declare global {
@@ -81,9 +86,34 @@ export default function App() {
   const [editingImage, setEditingImage] = useState<{ type: 'character' | 'scene', id: string, url: string } | null>(null);
   const [editPrompt, setEditPrompt] = useState('');
 
+  // --- API Key Management State ---
+  const [isKeyModalOpen, setIsKeyModalOpen] = useState(false);
+  const [externalKey, setExternalKey] = useState('');
+  const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+  const [testMessage, setTestMessage] = useState('');
+  const ENCRYPTION_SECRET = 'scenario-visualizer-v4-secret'; // For demo purposes
+
   // Check for API Key on mount
   useEffect(() => {
     const checkKey = async () => {
+      // 1. Check Local Storage for Encrypted Key
+      const savedEncryptedKey = localStorage.getItem('GEMINI_API_KEY_ENCRYPTED');
+      if (savedEncryptedKey) {
+        try {
+          const bytes = CryptoJS.AES.decrypt(savedEncryptedKey, ENCRYPTION_SECRET);
+          const decryptedKey = bytes.toString(CryptoJS.enc.Utf8);
+          if (decryptedKey) {
+            setExternalKey(decryptedKey);
+            setHasKey(true);
+            setAppState('INPUT');
+            return;
+          }
+        } catch (e) {
+          console.error("Failed to decrypt saved key", e);
+        }
+      }
+
+      // 2. Fallback to AI Studio Key Selector
       if (window.aistudio && await window.aistudio.hasSelectedApiKey()) {
         setHasKey(true);
         setAppState('INPUT');
@@ -101,7 +131,69 @@ export default function App() {
   };
 
   const getAI = () => {
-    return new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+    // Priority: External Key > process.env.GEMINI_API_KEY
+    const apiKey = externalKey || process.env.GEMINI_API_KEY || '';
+    return new GoogleGenAI({ apiKey });
+  };
+
+  const handleSaveAndEncrypt = () => {
+    if (!externalKey.trim()) {
+      alert("API 키를 입력해주세요.");
+      return;
+    }
+    const encrypted = CryptoJS.AES.encrypt(externalKey, ENCRYPTION_SECRET).toString();
+    localStorage.setItem('GEMINI_API_KEY_ENCRYPTED', encrypted);
+    setHasKey(true);
+    alert("API 키가 암호화되어 로컬 스토리지에 저장되었습니다.");
+  };
+
+  const handleDownloadKeyFile = () => {
+    if (!externalKey.trim()) {
+      alert("API 키를 입력해주세요.");
+      return;
+    }
+    const encrypted = CryptoJS.AES.encrypt(externalKey, ENCRYPTION_SECRET).toString();
+    const keyData = {
+      app: "Scenario Visualizer 4K",
+      key_type: "GEMINI_API_KEY",
+      encrypted_data: encrypted,
+      timestamp: new Date().toISOString()
+    };
+    const blob = new Blob([JSON.stringify(keyData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = "gemini-api-key.encrypted.json";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleTestConnection = async () => {
+    if (!externalKey.trim()) {
+      alert("API 키를 입력해주세요.");
+      return;
+    }
+    setTestStatus('testing');
+    setTestMessage('연결 테스트 중...');
+    try {
+      const ai = new GoogleGenAI({ apiKey: externalKey });
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: "Connection test. Respond with 'OK'.",
+      });
+      if (response.text) {
+        setTestStatus('success');
+        setTestMessage('연결 성공! API 키가 유효합니다.');
+      } else {
+        throw new Error("Empty response");
+      }
+    } catch (error: any) {
+      console.error("Connection test failed", error);
+      setTestStatus('error');
+      setTestMessage(`연결 실패: ${error.message || "API 키를 확인해주세요."}`);
+    }
   };
 
   const analyzeScript = async () => {
@@ -402,65 +494,85 @@ export default function App() {
 
   // --- Renderers ---
 
-  if (appState === 'KEY_SELECTION') {
-    return (
-      <div className="min-h-screen bg-[#0a0a0a] text-white flex items-center justify-center p-6">
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="max-w-md w-full bg-[#141414] border border-white/10 rounded-3xl p-8 text-center shadow-2xl"
-        >
-          <div className="w-16 h-16 bg-emerald-500/20 rounded-2xl flex items-center justify-center mx-auto mb-6">
-            <Key className="w-8 h-8 text-emerald-400" />
-          </div>
-          <h1 className="text-3xl font-bold tracking-tight mb-4">API Key Required</h1>
-          <p className="text-gray-400 mb-8 leading-relaxed">
-            To generate high-quality 4K images, you need to select a paid Gemini API key. 
-            Please ensure your project has billing enabled.
-          </p>
-          <button
-            onClick={handleOpenKeySelector}
-            className="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-4 rounded-2xl transition-all flex items-center justify-center gap-2 group"
-          >
-            Select API Key
-            <ChevronRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
-          </button>
-          <p className="mt-6 text-xs text-gray-500">
-            Visit <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" className="underline hover:text-emerald-400">billing documentation</a> for more info.
-          </p>
-        </motion.div>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white font-sans selection:bg-emerald-500/30">
       {loadingMessage && <LoadingOverlay message={loadingMessage} />}
 
-      {/* Header */}
-      <header className="sticky top-0 z-40 bg-[#0a0a0a]/80 backdrop-blur-xl border-bottom border-white/5 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-emerald-500 rounded-xl flex items-center justify-center">
-            <Sparkles className="w-6 h-6 text-black" />
-          </div>
-          <div>
-            <h1 className="text-lg font-bold tracking-tight leading-none">Scenario Visualizer</h1>
-            <span className="text-[10px] uppercase tracking-widest text-emerald-400 font-bold">4K Cinema Engine</span>
-          </div>
-        </div>
-        
-        {appState !== 'INPUT' && (
-          <button 
-            onClick={() => setAppState('INPUT')}
-            className="text-xs flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
+      {appState === 'KEY_SELECTION' ? (
+        <div className="min-h-screen flex items-center justify-center p-6">
+          <motion.div 
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="max-w-md w-full bg-[#141414] border border-white/10 rounded-3xl p-8 text-center shadow-2xl"
           >
-            <ArrowLeft className="w-4 h-4" />
-            New Project
-          </button>
-        )}
-      </header>
+            <div className="w-16 h-16 bg-emerald-500/20 rounded-2xl flex items-center justify-center mx-auto mb-6">
+              <Key className="w-8 h-8 text-emerald-400" />
+            </div>
+            <h1 className="text-3xl font-bold tracking-tight mb-4">API Key Required</h1>
+            <p className="text-gray-400 mb-8 leading-relaxed">
+              4K 고화질 이미지 생성을 위해 Gemini API 키가 필요합니다. 
+              내장형 키 대신 외장형 키를 사용하여 보안과 유연성을 높일 수 있습니다.
+            </p>
+            
+            <div className="space-y-4">
+              <button
+                onClick={handleOpenKeySelector}
+                className="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-4 rounded-2xl transition-all flex items-center justify-center gap-2 group"
+              >
+                기본 키 선택기 열기
+                <ChevronRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+              </button>
 
-      <main className="max-w-7xl mx-auto p-6">
+              <button
+                onClick={() => setIsKeyModalOpen(true)}
+                className="w-full bg-white/5 hover:bg-white/10 border border-white/10 text-white font-bold py-4 rounded-2xl transition-all flex items-center justify-center gap-2"
+              >
+                <Settings className="w-5 h-5" />
+                외장형 API 키 관리
+              </button>
+            </div>
+
+            <p className="mt-6 text-xs text-gray-500">
+              Visit <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" className="underline hover:text-emerald-400">billing documentation</a> for more info.
+            </p>
+          </motion.div>
+        </div>
+      ) : (
+        <>
+          {/* Header */}
+          <header className="sticky top-0 z-40 bg-[#0a0a0a]/80 backdrop-blur-xl border-bottom border-white/5 px-6 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-emerald-500 rounded-xl flex items-center justify-center">
+                <Sparkles className="w-6 h-6 text-black" />
+              </div>
+              <div>
+                <h1 className="text-lg font-bold tracking-tight leading-none">Scenario Visualizer</h1>
+                <span className="text-[10px] uppercase tracking-widest text-emerald-400 font-bold">4K Cinema Engine</span>
+              </div>
+            </div>
+            
+            <div className="flex items-center gap-4">
+              <button 
+                onClick={() => setIsKeyModalOpen(true)}
+                className="p-2 hover:bg-white/5 rounded-xl transition-colors text-gray-400 hover:text-white"
+                title="API 키 관리"
+              >
+                <Settings className="w-5 h-5" />
+              </button>
+              
+              {appState !== 'INPUT' && (
+                <button 
+                  onClick={() => setAppState('INPUT')}
+                  className="text-xs flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  New Project
+                </button>
+              )}
+            </div>
+          </header>
+
+          <main className="max-w-7xl mx-auto p-6">
         <AnimatePresence mode="wait">
           {appState === 'INPUT' && (
             <motion.div
@@ -815,6 +927,117 @@ Sarah enters, her eyes red from crying."
           Scenario Visualizer v1.0 • 4K Realistic Output
         </div>
       </footer>
+    </>
+  )}
+
+  {/* API Key Management Modal */}
+      <AnimatePresence>
+        {isKeyModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsKeyModalOpen(false)}
+              className="absolute inset-0 bg-black/80 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-lg bg-[#1a1a1a] border border-white/10 rounded-3xl p-8 shadow-2xl overflow-hidden"
+            >
+              <div className="flex items-center justify-between mb-8">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-emerald-500/20 rounded-xl flex items-center justify-center">
+                    <ShieldCheck className="w-6 h-6 text-emerald-400" />
+                  </div>
+                  <h2 className="text-xl font-bold">외장형 API 키 관리</h2>
+                </div>
+                <button 
+                  onClick={() => setIsKeyModalOpen(false)}
+                  className="p-2 hover:bg-white/5 rounded-full transition-colors"
+                >
+                  <ArrowLeft className="w-6 h-6" />
+                </button>
+              </div>
+
+              <div className="space-y-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-400 mb-2">Gemini API Key</label>
+                  <div className="relative">
+                    <input 
+                      type="password"
+                      value={externalKey}
+                      onChange={(e) => setExternalKey(e.target.value)}
+                      placeholder="AI Studio에서 발급받은 API 키를 입력하세요"
+                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-emerald-500/50 transition-colors pr-12"
+                    />
+                    <Key className="absolute right-4 top-3.5 w-5 h-5 text-gray-600" />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <button
+                    onClick={handleSaveAndEncrypt}
+                    className="bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2"
+                  >
+                    <ShieldCheck className="w-5 h-5" />
+                    암호화 저장
+                  </button>
+                  <button
+                    onClick={handleDownloadKeyFile}
+                    className="bg-white/5 hover:bg-white/10 border border-white/10 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2"
+                  >
+                    <FileDown className="w-5 h-5" />
+                    키 파일 다운로드
+                  </button>
+                </div>
+
+                <div className="pt-4 border-t border-white/5">
+                  <button
+                    onClick={handleTestConnection}
+                    disabled={testStatus === 'testing'}
+                    className="w-full bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 text-blue-400 font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {testStatus === 'testing' ? <Loader2 className="w-5 h-5 animate-spin" /> : <Activity className="w-5 h-5" />}
+                    연결 테스트 실행
+                  </button>
+
+                  {testStatus !== 'idle' && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className={`mt-4 p-4 rounded-xl flex items-start gap-3 ${
+                        testStatus === 'success' ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400' : 
+                        testStatus === 'error' ? 'bg-red-500/10 border border-red-500/20 text-red-400' : 
+                        'bg-blue-500/10 border border-blue-500/20 text-blue-400'
+                      }`}
+                    >
+                      {testStatus === 'success' ? <CheckCircle2 className="w-5 h-5 mt-0.5 shrink-0" /> : 
+                       testStatus === 'error' ? <AlertCircle className="w-5 h-5 mt-0.5 shrink-0" /> : 
+                       <Loader2 className="w-5 h-5 mt-0.5 shrink-0 animate-spin" />}
+                      <p className="text-sm font-medium">{testMessage}</p>
+                    </motion.div>
+                  )}
+                </div>
+
+                {hasKey && (
+                  <button
+                    onClick={() => {
+                      setIsKeyModalOpen(false);
+                      setAppState('INPUT');
+                    }}
+                    className="w-full bg-white text-black font-bold py-4 rounded-2xl mt-4 hover:bg-gray-200 transition-colors"
+                  >
+                    애플리케이션 시작하기
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
